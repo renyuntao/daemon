@@ -38,7 +38,7 @@ script: |
   #!/bin/bash
 
   echo "Hello World!"
-bin: ls
+#command: /path/to/command
 user: cloudops
 extrainrun: |
   echo "------------"
