@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+#
+# Function:
+#   Control daemon
+#
+# usage:  daemon  DAEMON
+#         daemon  -r DAEMON
+#         daemon  -k DAEMON
+#         daemon  -h
+#
+# positional arguments:
+#   DAEMON      Specific daemon name
+# 
+# optional arguments:
+#   -h, --help  show this help message and exit
+#   -r, --run   Run daemon
+#   -k, --kill  Kill daemon
+#
+# Example:
+#   - Show status of DAEMON
+#     $ daemon DAEMON
+#   - Run DAEMON
+#     $ daemon -r DAEMON
+#   - Kill DAEMON
+#     $ daemon -k DAEMON
+#
+# DAEMON conf examle:
+#   ---
+#   script: |
+#     #!/bin/bash
+#   
+#     echo "Hello World!"
+#   bin: ls
+#   user: cloudops
+#   extrainrun: |
+#     echo "------------"
+#     echo "sleep 5..."
+#     sleep 5
+#   log:
+#     size: 10000000
+#     number: 10
+#
+# Date:
+#   2018-10-22
+
+import os
+import sys
+import yaml
+import argparse
+
+def help(wantReturn=True):
+	prog = os.path.basename(__file__)
+	usage = """ %(prog)s  DAEMON
+	%(prog)s  -r DAEMON
+	%(prog)s  -k DAEMON
+	%(prog)s  -h"""
+
+	if wantReturn:
+		return usage
+	else:
+		usage = usage.replace('(prog)', '')
+		print("usage: ", end='')
+		print(usage % (prog, prog, prog, prog))
+
+argc = len(sys.argv)
+if argc == 1:
+	help(False)
+	exit(0)
+
+parser = argparse.ArgumentParser(prog=os.path.basename(__file__),
+						description="Control daemon",
+						usage=help())
+parser.add_argument('daemon', metavar="DAEMON", help="Specific daemon name")
+parser.add_argument('-r', '--run', action="count", help="Run daemon")
+parser.add_argument('-k', '--kill', action="count", help="Kill daemon")
+args = parser.parse_args()
+
+conf = os.path.join(os.path.dirname(__file__), '.config')
+confFd = open(conf, 'r')
+confDict = yaml.load(confFd)
+confFd.close()
+
+confDir = confDict['daemon']['conf']
+serviceDir = confDict['daemon']['service']
+os.system('mkdir -p {0} {1}'.format(confDir, serviceDir))
+prog = os.path.basename(__file__)
+
+daemon = args.daemon
+daemonPath = os.path.join(serviceDir, daemon)
+
+
+if args.run is None and args.kill is None:
+	os.system('svstat /service/{0}'.format(daemon))
+	exit(0)
+
+if args.run and args.kill:
+	print("{0}: Error: -r can't used with -k".format(prog))
+	exit(1)
+
+
+if args.run:
+	os.system('mkdir -p /service/')
+	if os.path.islink('/service/{0}'.format(daemon)):
+		print("{0}: already running".format(daemon))
+		exit(0)
+
+	daemonConf = os.path.join(confDir, daemon)
+
+	# Check if daemon conf exist
+	if not os.path.isfile(daemonConf):
+		print("{0}: Error: the conf of '{1}' doesn't exists".format(prog, daemon))
+		exit(1)
+
+	daemonConfFd = open(daemonConf, 'r')
+	daemonConfDict = yaml.load(daemonConfFd)
+	daemonConfFd.close()
+
+	os.system('mkdir -p {0}/log/'.format(daemonPath))
+
+	# Get content of daemon/run
+	if 'script' in daemonConfDict:
+		script = daemonConfDict['script']
+		scriptPath = os.path.join(daemonPath, 'run.script')
+		scriptFd = open(scriptPath, 'w')
+		scriptFd.write(script)
+		scriptFd.close()
+		os.system('chmod +x {0}'.format(scriptPath))
+		command = scriptPath
+	else:
+		command = daemonConfDict.get('command')
+		if command is None:
+			print("{0}: Error: the format of conf file '{1}' is incorrect".format(prog, daemon))
+			exit(1)
+
+	headofrun = confDict['supervise']['headofrun']
+	user = daemonConfDict.get('user', 'root')
+	realcommand = "exec setuidgid {0} {1}".format(user, command)
+
+	if 'extrainrun' in daemonConfDict:
+		extrainrun = daemonConfDict['extrainrun']
+		runcontent = "{0}\n{1}\n{2}\n".format(headofrun, extrainrun, realcommand)
+	else:
+		runcontent = "{0}\n{1}\n".format(headofrun, realcommand)
+
+	# Create daemon/run
+	run = os.path.join(daemonPath, 'run')
+	runFd = open(run, 'w')
+	runFd.write(runcontent)
+	runFd.close()
+	os.system('chmod +x {0}'.format(run))
+
+	# Get content of daemon/log/run
+	if 'log' in daemonConfDict:
+		size = daemonConfDict['log'].get('size', 10000000)
+		number = daemonConfDict['log'].get('number', 10)
+	else:
+		size = 10000000
+		number = 10
+	headofrun = confDict['supervise']['log']['headofrun']
+	command = "exec setuidgid root multilog t s{0} n{1} '!tai64nlocal' ./main".format(size, number)
+	runcontent = "{0}\n{1}\n".format(headofrun, command)
+
+
+	# Create daemon/run/log/run
+	run = os.path.join(daemonPath, 'log/run')
+	runFd = open(run, 'w')
+	runFd.write(runcontent)
+	runFd.close()
+	os.system('chmod +x {0}'.format(run))
+
+	# Create soft link
+	os.system('ln -sfn {0} /service/{1}'.format(daemonPath, daemon))
+	print("{0}: Start success.".format(daemon))
+
+# Kill service
+else:
+	os.system('rm -f /service/{0} && svc -dx {1} && svc -dx {1}/log'.format(daemon, daemonPath))
+	os.system('rm -rf {0}'.format(daemonPath))
+	print("{0}: Stop success.".format(daemon))
